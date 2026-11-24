@@ -24,7 +24,9 @@
 #include "qapi/qapi-types-common.h"
 #include "qapi/qapi-visit-common.h"
 #include "migration/blocker.h"
-#include "host-cpu.h"
+#ifdef TARGET_I386
+#include "host-cpu.h"   /* x86 -cpu host passthrough */
+#endif
 #include "accel/accel-cpu-target.h"
 #include <winerror.h>
 
@@ -544,7 +546,9 @@ static void whpx_cpu_accel_class_init(ObjectClass *oc, const void *data)
 {
     AccelCPUClass *acc = ACCEL_CPU_CLASS(oc);
 
+#ifdef TARGET_I386
     acc->cpu_target_realize = host_cpu_realizefn;
+#endif
     acc->cpu_instance_init = whpx_cpu_instance_init;
 }
 
