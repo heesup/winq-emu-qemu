@@ -18,6 +18,8 @@
 #include "qemu/error-report.h"
 #include "qapi/error.h"
 #include "system/system.h"
+#include "system/cpus.h"
+#include "qemu/main-loop.h"
 #include "hw/virtio/virtio.h"
 #include "hw/virtio/virtio-gpu.h"
 #include "hw/virtio/virtio-gpu-bswap.h"
@@ -87,6 +89,20 @@ static void virtio_gpu_gl_handle_ctrl(VirtIODevice *vdev, VirtQueue *vq)
     virtio_gpu_virgl_fence_poll(g);
 }
 
+typedef struct VirtIOGPUGLResetScanout {
+    VirtIOGPU *g;
+    bool done;
+} VirtIOGPUGLResetScanout;
+
+static void virtio_gpu_gl_reset_scanout_bh(void *opaque)
+{
+    VirtIOGPUGLResetScanout *rs = opaque;
+
+    virtio_gpu_virgl_reset_scanout(rs->g);
+    rs->done = true;
+    qemu_cond_broadcast(&rs->g->reset_cond);
+}
+
 static void virtio_gpu_gl_reset(VirtIODevice *vdev)
 {
     VirtIOGPU *g = VIRTIO_GPU(vdev);
@@ -97,9 +113,27 @@ static void virtio_gpu_gl_reset(VirtIODevice *vdev)
     /*
      * GL functions must be called with the associated GL context in main
      * thread, and when the renderer is unblocked.
+     *
+     * A guest-initiated device reset is an MMIO write handled on the vCPU
+     * thread. Disabling the scanout there calls into the display's GL code
+     * (e.g. egl_fb_destroy() via sdl2_set_scanout_mode()) with no current
+     * context. Mesa tolerates that, but the Windows NVIDIA ICD crashes.
+     * It is hit on aarch64, where UEFI's virtio-gpu GOP driver leaves a
+     * scanout active when Linux resets the device. Run it in the main loop
+     * instead, like virtio_gpu_reset() does for its own state.
      */
     if (gl->renderer_state == RS_INITED) {
-        virtio_gpu_virgl_reset_scanout(g);
+        if (qemu_in_vcpu_thread()) {
+            VirtIOGPUGLResetScanout rs = { .g = g, .done = false };
+
+            aio_bh_schedule_oneshot(qemu_get_aio_context(),
+                                    virtio_gpu_gl_reset_scanout_bh, &rs);
+            while (!rs.done) {
+                qemu_cond_wait_bql(&g->reset_cond);
+            }
+        } else {
+            virtio_gpu_virgl_reset_scanout(g);
+        }
         gl->renderer_state = RS_RESET;
     }
 }
