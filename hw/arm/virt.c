@@ -1918,6 +1918,22 @@ static void virt_set_high_memmap(VirtMachineState *vms,
         region_base = ROUND_UP(base, extended_memmap[i].size);
         region_size = extended_memmap[i].size;
 
+        /*
+         * WINQ-EMU: on hosts with a small GPA width (e.g. 39 bits under
+         * WHPX on Windows on ARM) the default 512 GiB high PCIe MMIO window
+         * does not fit and would be dropped, leaving only the ~1 GiB 32-bit
+         * window for BARs. Shrink it until it fits instead (min 1 GiB).
+         */
+        if (i == VIRT_HIGH_PCIE_MMIO) {
+            while (region_size > GiB &&
+                   ROUND_UP(base, region_size) + region_size >
+                   BIT_ULL(pa_bits)) {
+                region_size >>= 1;
+            }
+            region_base = ROUND_UP(base, region_size);
+            extended_memmap[i].size = region_size;
+        }
+
         vms->memmap[i].base = region_base;
         vms->memmap[i].size = region_size;
 

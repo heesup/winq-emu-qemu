@@ -636,12 +636,30 @@ uint32_t whpx_arm_get_ipa_bit_size(void)
     }
 
     /*
-     * We clamp any IPA size we want to back the VM with to a valid PARange
-     * value so the guest doesn't try and map memory outside of the valid range.
-     * This logic just clamps the passed in IPA bit size to the first valid
-     * PARange value <= to it.
+     * Lay the machine out in the full GPA width the hypervisor supports.
+     * Windows on ARM commonly reports 39 bits, which is not a PARange value;
+     * rounding it down to 36 bits (64 GiB) leaves no room for the virt
+     * machine's high PCIe MMIO window above 256 GiB, so large 64-bit BARs
+     * (e.g. virtio-gpu hostmem for Venus) can't be placed and firmware
+     * asserts in PciBusDxe. The guest-visible PARange is rounded *up*
+     * separately (see clamp_id_aa64mmfr0_parange_to_ipa_size()); the memory
+     * map itself never places anything above this width.
      */
-    return round_down_to_parange_bit_size(whpx_cap.PhysicalAddressWidth);
+    return whpx_cap.PhysicalAddressWidth;
+}
+
+/* Smallest architectural PARange index whose size covers @bit_size. */
+static uint8_t round_up_to_parange_index(uint8_t bit_size)
+{
+    static const uint8_t pamax_map[] = { 32, 36, 40, 42, 44, 48, 52 };
+    uint8_t i;
+
+    for (i = 0; i < ARRAY_SIZE(pamax_map) - 1; i++) {
+        if (pamax_map[i] >= bit_size) {
+            break;
+        }
+    }
+    return i;
 }
 
 static void clamp_id_aa64mmfr0_parange_to_ipa_size(ARMISARegisters *isar)
@@ -649,8 +667,11 @@ static void clamp_id_aa64mmfr0_parange_to_ipa_size(ARMISARegisters *isar)
     uint32_t ipa_size = whpx_arm_get_ipa_bit_size();
     uint64_t id_aa64mmfr0;
 
-    /* Clamp down the PARange to the IPA size the kernel supports. */
-    uint8_t index = round_down_to_parange_index(ipa_size);
+    /*
+     * Advertise a PARange that covers the whole GPA width in use, so the
+     * guest can reach devices mapped up to that width.
+     */
+    uint8_t index = round_up_to_parange_index(ipa_size);
     id_aa64mmfr0 = GET_IDREG(isar, ID_AA64MMFR0);
     id_aa64mmfr0 = (id_aa64mmfr0 & ~R_ID_AA64MMFR0_PARANGE_MASK) | index;
     SET_IDREG(isar, ID_AA64MMFR0, id_aa64mmfr0);
